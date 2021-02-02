@@ -1,0 +1,5 @@
+walker:
+  folder: TBD
+
+es:
+  index: story

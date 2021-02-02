@@ -1,17 +1,13 @@
 package main
 
-import (
-	"fmt"
+import "time"
 
-	"guegan.org/alan/go-alan-es/morestrings"
-	"github.com/google/go-cmp/cmp"
-	"github.com/olivere/elastic/v7"
-
-)
-
-func main() {
-	fmt.Println(morestrings.ReverseRunes("!oG ,olleH"))
-	fmt.Println(cmp.Diff("Hello World", "Hello Go"))
-
+type Story struct {
+	Name    string `json:"name"`
+	Message string `json:"message"`
+	Title   string `json:"title"`
+	Author   string `json:"author"`
+	ModTime time.Time `json:"modtime"`
 }
+
 

@@ -1,0 +1,12 @@
+<html>
+<head><title>{{ .title }}</title></head>
+<body>
+<ul>
+{{ range .list }}
+<li><a href="/page?name={{ .Name }}">{{ .Title }}</a> <a href="/author?name={{ .Author }}">{{ .Author }}</a></li>
+{{ end }}
+</ul>
+</body>
+
+</html>
+
