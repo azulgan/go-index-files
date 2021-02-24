@@ -1,44 +1,56 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	"crypto/md5"
+	"crypto/sha1"
 	"fmt"
-	"github.com/antchfx/htmlquery"
-	"github.com/olivere/elastic/v7"
-	"golang.org/x/net/html"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
-	//"reflect"
-	"regexp"
-	"strconv"
+	"time"
+
+	//"strconv"
 	"strings"
 )
 
-func walk(client *elastic.Client, index *Config, folder string) {
-	stories := []Story{}
+func walk(adapter *EsAdapter, config *Config, folder string, archive bool) {
+	startTime := time.Now()
+	cur := 0
+	signatureChan := make(chan Signature)
+	endSignalChan := make(chan bool)
+	go inserter(adapter, signatureChan, endSignalChan, config, startTime)
+	//refDate := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
 	err := filepath.Walk(folder,
 		func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
-			if isGoodFile(info) {
-				s := load(client, index, info.Name())
+			if isGoodFile(info, config) {
+				s := adapter.loadByPath(path)
 				if s == nil {
+					if (cur / 10) * 10 == cur {
+						fmt.Print("Scanning ", path, "... ")
+					}
 					dat, _ := ioutil.ReadFile(path)
-					//fmt.Print(string(dat))
-					//datstr := string(dat)
-					htmlParsed := openAndFilter(dat)
-					title := getTitleFromDoc(htmlParsed)
-					datstr := asString(htmlParsed)
-					author := parseAuthor(title)
-					fmt.Println(author, info.Size())
-					story := Story{Name: info.Name(), Message: datstr, Title: title, Author: author, ModTime: info.ModTime()}
-					stories = append(stories, story)
+					md5Sum := fmt.Sprintf("%x", md5.Sum(dat))
+					sha1Sum := fmt.Sprintf("%x", sha1.Sum(dat))
+					story := Signature{Name: path, ShortName: info.Name(), Signature: md5Sum,
+						Signature2: sha1Sum,
+						Size: info.Size(), Time: info.ModTime(), Archive: archive}
+					signatureChan <- story
+					if (cur / 10) * 10 == cur {
+						fmt.Println("Done")
+					}
+					cur++
 				} else {
-					fmt.Println("Ignoring ", s.Name)
+					if s.ShortName == "" {
+						s.ShortName = info.Name()
+						s.Archive = archive
+						signatureChan <- *s
+					//} else {
+					//	//fmt.Println("Ignoring ", s.Name)
+					}
 					//fmt.Print("Test: ", s.Author, " ", s.Title, " ", s.Name)
 					//if s.Author == "" || s.Title == "" || s.Title == "title" {
 					//	datstr := s.Message
@@ -63,151 +75,40 @@ func walk(client *elastic.Client, index *Config, folder string) {
 	if err != nil {
 		log.Println(err)
 	}
-	insertByChuncks(client, index, stories, 100)
-
+	close(signatureChan)
+	fmt.Println("Precalc duration : ", time.Now().Sub(startTime))
+	endSignal := <- endSignalChan
+	fmt.Println("Ended coroutine with signal ", endSignal)
 }
 
-func insertByChuncks(client *elastic.Client, index string, stories []Story, chucksSize int) {
-	var storiesChuncks = split(stories, chucksSize)
-	for i, ch := range storiesChuncks {
-		insertBulk(client, index, ch, i * chucksSize)
-	}
+func isGoodFile(info os.FileInfo, config *Config) bool {
+	return !info.IsDir() && strings.HasSuffix(info.Name(), config.Walker.Extension)
 }
 
-func split(stories []Story, chunkSize int) [][]Story {
-	ret := [][]Story{}
-	for i := 0; i < len(stories); i += chunkSize {
-		end := i + chunkSize
-
-		if end > len(stories) {
-			end = len(stories)
-		}
-
-		ret = append(ret, stories[i:end])
-	}
-	return ret
-}
-
-func insertBulk(client *elastic.Client, index string, stories []Story, startId int) {
-	bulk := client.Bulk()
-	docID := startId
-	for _, story := range stories {
-
-		// Incrementally change the _id number in each iteration
-		docID++
-
-		// Convert the _id integer into a string
-		idStr := strconv.Itoa(docID)
-		req := elastic.NewBulkIndexRequest()
-		req.OpType("index") // set type to "index" document
-		req.Index(index)
-		//req.Type("_doc") // Doc types are deprecated (default now _doc)
-		req.Id(idStr)
-		req.Doc(story)
-		//fmt.Println("req:", req)
-		//fmt.Println("req TYPE:", reflect.TypeOf(req))
-		bulk = bulk.Add(req)
-		fmt.Println("NewBulkIndexRequest().NumberOfActions():", bulk.NumberOfActions())
-	}
-	_, err := bulk.Do(context.Background())
-
-	// Check if the Do() method returned any errors
-	if err != nil {
-		log.Fatalf("bulk.Do(ctx) ERROR:", err)
-	} else {
-		//// If there is no error then get the Elasticsearch API response
-		//indexed := bulkResp.Indexed()
-		//fmt.Println("nbulkResp.Indexed():", indexed)
-		//fmt.Println("bulkResp.Indexed() TYPE:", reflect.TypeOf(indexed))
-		//
-		//// Iterate over the bulkResp.Indexed() object returned from bulk.go
-		//t := reflect.TypeOf(indexed)
-		//fmt.Println("nt:", t)
-		//fmt.Println("NewBulkIndexRequest().NumberOfActions():", bulk.NumberOfActions())
-		//
-		//// Iterate over the document responses
-		//for i := 0; i < t.NumMethod(); i++ {
-		//	method := t.Method(i)
-		//	fmt.Println("nbulkResp.Indexed() METHOD NAME:", i, method.Name)
-		//	fmt.Println("bulkResp.Indexed() method:", method)
-		//}
-		//
-		//// Return data on the documents indexed
-		//fmt.Println("nBulk response Index:", indexed)
-		//for _, info := range indexed {
-		//	fmt.Println("nBulk response Index:", info)
-		//	//fmt.Println("nBulk response Index:", info.Index)
-		//}
-	}
-}
-
-func parseAuthor(title string) string {
-	re := regexp.MustCompile("^([^\\']*)'")
-	match := re.FindStringSubmatch(title)
-	if match == nil {
-		if len(title) >= 9 && title[0:9] == "Anonymous" {
-			return title[0:9]
-		} else {
-			return title
-		}
-	}
-	return match[1]
-}
-
-func openAndFilter(data []byte) *html.Node {
-	doc, err := htmlquery.Parse(bytes.NewReader(data))
-	if err != nil {
-		return nil
-	}
-	script, err := htmlquery.QueryAll(doc, "//script")
-	for _ , s := range script {
-		for s.FirstChild != nil {
-			s.RemoveChild(s.FirstChild)
-		}
-		found := -1
-		for i, a := range s.Attr {
-			if a.Key == "src" {
-				found = i
+func inserter(adapter *EsAdapter, ch chan Signature, signalChan chan bool,
+	config *Config, startTime time.Time) {
+	for {
+		max := config.Es.BulkInsert
+		var ok bool
+		var latestIndex = -1
+		sigArray := make([]Signature, max)
+		for i := 0; i < max; i++ {
+			sigArray[i], ok = <- ch
+			if !ok {
+				break
 			}
+			latestIndex = i
 		}
-		if found != -1 {
-			s.Attr[found].Val = ""
+		err := adapter.insertBulk(sigArray, latestIndex + 1)
+		if (!ok) {
+			break
+		}
+		if err != nil {
+			fmt.Println("Something went wrong ", err)
+			panic(err)
+			break
 		}
 	}
-	return doc
-}
-
-func asString(doc *html.Node) string {
-	return htmlquery.OutputHTML(doc, true)
-}
-
-func getTitleFromDoc(doc *html.Node) string {
-	node, err := htmlquery.Query(doc, "//title")
-	if err != nil {
-		return ""
-	}
-	//script, err := htmlquery.QueryAll(doc, "//script")
-	//htmlquery.OutputHTML(doc, true)
-	if node != nil {
-		return node.FirstChild.Data
-	}
-	return ""
-}
-
-func getTitle(datstr []byte) string {
-	doc, err := htmlquery.Parse(bytes.NewReader(datstr))
-	node, err := htmlquery.Query(doc, "//title")
-	if err != nil {
-		return ""
-	}
-	//script, err := htmlquery.QueryAll(doc, "//script")
-	//htmlquery.OutputHTML(doc, true)
-	if node != nil {
-		return node.FirstChild.Data
-	}
-	return ""
-}
-
-func isGoodFile(info os.FileInfo) bool {
-	return !info.IsDir() && strings.HasSuffix(info.Name(), ".html")
+	fmt.Println("Full duration : ", time.Now().Sub(startTime))
+	signalChan <- true
 }
