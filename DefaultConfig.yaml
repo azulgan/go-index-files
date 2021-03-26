@@ -1,6 +1,14 @@
-walker:
+imcoming:
   folder: TBD
+  extension: ".jpeg"
+  nameFormat:"2006-01-02T150405.jpg"
+walker:
+  folder1: TBD
+  folder2: TBD
   archive: TBD
+  extension: ".jpeg"
 
 es:
   index: story
+duplicates:
+  action: show

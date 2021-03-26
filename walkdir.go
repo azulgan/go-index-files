@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-func walk(adapter *EsAdapter, config *Config, folder string, archive bool) {
+func walk(adapter EsInterface, config *Config, folder string, archive bool) {
 	startTime := time.Now()
 	cur := 0
 	signatureChan := make(chan Signature)
@@ -27,7 +27,7 @@ func walk(adapter *EsAdapter, config *Config, folder string, archive bool) {
 				return err
 			}
 			if isGoodFile(info, config) {
-				s := adapter.loadByPath(path)
+				s := adapter.LoadByPath(path)
 				if s == nil {
 					if (cur / 10) * 10 == cur {
 						fmt.Print("Scanning ", path, "... ")
@@ -85,7 +85,7 @@ func isGoodFile(info os.FileInfo, config *Config) bool {
 	return !info.IsDir() && strings.HasSuffix(info.Name(), config.Walker.Extension)
 }
 
-func inserter(adapter *EsAdapter, ch chan Signature, signalChan chan bool,
+func inserter(adapter EsInterface, ch chan Signature, signalChan chan bool,
 	config *Config, startTime time.Time) {
 	for {
 		max := config.Es.BulkInsert
@@ -99,7 +99,7 @@ func inserter(adapter *EsAdapter, ch chan Signature, signalChan chan bool,
 			}
 			latestIndex = i
 		}
-		err := adapter.insertBulk(sigArray, latestIndex + 1)
+		err := adapter.InsertBulk(sigArray, latestIndex + 1)
 		if (!ok) {
 			break
 		}

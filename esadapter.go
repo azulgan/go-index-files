@@ -9,16 +9,26 @@ import (
 	"log"
 )
 
+type EsInterface interface {
+	CreateIndexIfNecessary()
+	LoadAllByNameMatch(searchedName string, max int) []Signature
+	LoadByPath(searchedName string) *Signature
+	SignatureDuplicates() *[][]Signature
+	InsertBulk(signatures []Signature, max int) error
+	DeleteById(id string, name string) error
+	SavePathChange(v Signature, newpath string) error
+}
+
 type EsAdapter struct {
 	client *elastic.Client
 	index string
 }
 
-func NewEsAdapter(client *elastic.Client, index string) *EsAdapter {
+func NewEsAdapter(client *elastic.Client, index string) EsInterface {
 	return &EsAdapter{client: client, index: index}
 }
 
-func (a *EsAdapter) createIndexIfNecessary() {
+func (a *EsAdapter) CreateIndexIfNecessary() {
 	indexExists, err := a.client.IndexExists(a.index).Do(context.Background())
 	if err != nil {
 		panic(err)
@@ -36,8 +46,17 @@ func (a *EsAdapter) load(searchedName string, max int) []Signature {
 	return a.loadAll(searchedName, "signature.keyword", max)
 }
 
-func (a *EsAdapter) loadAllByNameMatch(searchedName string, max int) []Signature {
-	return a.loadAllMatch(searchedName, "name", max)
+func (a *EsAdapter) LoadAllByNameMatch(searchedName string, max int) []Signature {
+	ret := make([]Signature, 0)
+	const SLICES = 1000
+	fromIdx := 0
+	for (max > SLICES) {
+		ret = append(ret, a.loadAllMatch(searchedName, "shortname", fromIdx, SLICES)...)
+		fromIdx += SLICES
+		max -= SLICES
+	}
+	ret = append(ret, a.loadAllMatch(searchedName, "shortname", fromIdx, max)...)
+	return ret
 }
 
 func (a *EsAdapter) loadAll(searchedName string, field string, max int) []Signature {
@@ -75,15 +94,15 @@ func (a *EsAdapter) loadAll(searchedName string, field string, max int) []Signat
 	return ret
 }
 
-func (a *EsAdapter) loadAllMatch(searchedName string, field string, max int) []Signature {
+func (a *EsAdapter) loadAllMatch(searchedName string, field string, fromIdx int, max int) []Signature {
 	// Search with a term query
-	termQuery := elastic.NewMatchQuery(field, searchedName)
+	termQuery := elastic.NewQueryStringQuery(field + ": '" + searchedName + "'")
 	searchResult, err := a.client.Search().
 		Index(a.index).            // exists in index "tweets"
 		Query(termQuery).           // specify the query
-		Sort("shortname.keyword", true). // sort by "user" field, ascending
-		From(0).Size(max).           // take documents 0-9
-		//Pretty(true).               // pretty print request and response JSON
+		//Sort("shortname.keyword", true). // sort by "user" field, ascending
+		From(fromIdx).Size(max).
+		Pretty(true).               // pretty print request and response JSON
 		Do(context.Background())    // execute
 	if err != nil {
 		// Handle error
@@ -110,7 +129,7 @@ func (a *EsAdapter) loadAllMatch(searchedName string, field string, max int) []S
 	return ret
 }
 
-func (a *EsAdapter) loadByPath(searchedName string) *Signature {
+func (a *EsAdapter) LoadByPath(searchedName string) *Signature {
 	// Search with a term query
 	termQuery := elastic.NewTermQuery("name.keyword", searchedName)
 	searchResult, err := a.client.Search().
@@ -164,7 +183,7 @@ func (a *EsAdapter) loadByPath(searchedName string) *Signature {
 	return nil
 }
 
-func (a *EsAdapter) signatureDuplicates() *[][]Signature {
+func (a *EsAdapter) SignatureDuplicates() *[][]Signature {
 	// Search with a term query
 	ret := [][]Signature{}
 	//termQuery := elastic.NewTermQuery("author.keyword", searchedName)
@@ -203,11 +222,10 @@ func (a *EsAdapter) signatureDuplicates() *[][]Signature {
 	return &ret
 }
 
-
 func (a *EsAdapter) insertByChuncks(stories []Signature, chucksSize int) error {
 	var storiesChuncks = a.split(stories, chucksSize)
 	for _, ch := range storiesChuncks {
-		err := a.insertBulk(ch, len(stories))
+		err := a.InsertBulk(ch, len(stories))
 		if err != nil {
 			return err
 		}
@@ -227,7 +245,7 @@ func (a *EsAdapter) split(stories []Signature, chunkSize int) [][]Signature {
 	return ret
 }
 
-func (a *EsAdapter) insertBulk(signatures []Signature, max int) error {
+func (a *EsAdapter) InsertBulk(signatures []Signature, max int) error {
 	bulk := a.client.Bulk()
 	atLeastOne := false
 	for i := 0; i < max; i++ {
@@ -282,7 +300,7 @@ func (a *EsAdapter) insertBulk(signatures []Signature, max int) error {
 	return nil
 }
 
-func (a *EsAdapter) deleteById(id string, name string) error {
+func (a *EsAdapter) DeleteById(id string, name string) error {
 	ctx := context.Background()
 	res, err := a.client.Delete().
 		Index(a.index).
@@ -301,4 +319,9 @@ func (a *EsAdapter) saveSingleSignature(v Signature) error {
 	signatures := make([]Signature, 1)
 	signatures[0] = v
 	return a.insertByChuncks(signatures, 1)
+}
+
+func (a *EsAdapter) SavePathChange(v Signature, newpath string) error {
+	v.Name = newpath
+	return a.saveSingleSignature(v)
 }

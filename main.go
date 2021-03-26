@@ -4,22 +4,32 @@ import (
 	"fmt"
 	"github.com/olivere/elastic/v7"
 	"gopkg.in/yaml.v2"
-	"io"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 type Config struct {
+	Incoming struct {
+		Folder string `yaml:"folder" default:"."`
+		Extension string `yaml:"extension" default:".jpeg"`
+		NameFormat string `yaml:"nameFormat" default:"2006-01-02T150405.jpg"`
+	} `yaml:"incoming"`
 	Walker struct {
 		Folder1 string `yaml:"folder1" default:"."`
 		Folder2 string `yaml:"folder2" default:"."`
 		Extension string `yaml:"extension" default:".jpg"`
 	} `yaml:"walker"`
 	Es struct {
-		Index string `yaml:"index" default:"story"`
+		Index string `yaml:"index" default:"signatures"`
 		BulkInsert int `yaml:"bulkInsert" default:100"`
 	} `yaml:"es"`
+	Duplicates struct {
+		Action string `yaml:"action" default:"show"`
+	} `yaml:"duplicates"`
 }
 
 func loadConfig() Config {
@@ -58,7 +68,7 @@ func main() {
 		os.Exit(3)
 	}
 	adapter := NewEsAdapter(client, config.Es.Index)
-	adapter.createIndexIfNecessary()
+	adapter.CreateIndexIfNecessary()
 	action := ""
 	args := os.Args[1:]
 	for len(args) > 0 {
@@ -73,80 +83,82 @@ func main() {
 			folder = config.Walker.Folder2
 			walk(adapter, &config, folder, false)
 		} else if action == "scan" {
+			fmt.Println("Scanning directories...")
 			folder := config.Walker.Folder2
 			walk(adapter, &config, folder, false)
+			fmt.Println("done")
 		} else if action == "dupl" {
-			dupls(adapter, false)
+			fmt.Println("Chasing duplicates...")
+			dupls(adapter, &config, false)
+			fmt.Println("done")
 		} else if action == "web" {
 			web(client, &config)
 		} else if action == "move" {
 			theDate := ""
 			args, theDate = nextParam(args)
-			err := move(adapter, &config, theDate)
+			err := move(adapter, NewFileMover(false), &config, theDate)
 			if err != nil {
-				panic(err)
+				log.Panic(err)
 			}
+		} else if action == "movedryrun" {
+			theDate := ""
+			args, theDate = nextParam(args)
+			err := move(adapter, NewFileMover(true), &config, theDate)
+			if err != nil {
+				log.Panic(err)
+			}
+		} else if action == "incoming" {
+			fmt.Println("Looking for incoming files...")
+			err := incoming(&config)
+			if err != nil {
+				log.Panic(err)
+			}
+			fmt.Println("done")
+		} else if action == "wait" {
+			fmt.Println("Waiting 3 seconds...")
+			time.Sleep(3 * time.Second)
+			fmt.Println("done")
 		}
 	}
 	//exists(client, "")
 }
 
-func move(a *EsAdapter, c *Config, date string) error {
-	list := a.loadAllByNameMatch(date, 10000)
-	basedir := c.Walker.Folder2
-	targetdir := c.Walker.Folder1
-	for _, v := range list {
-		if v.Name[0:len(basedir)] == basedir {
-			startdatepos := len(basedir) + 9
-			datestr := v.Name[startdatepos:startdatepos+10]
-			if datestr != date {
-				//log.Println(v.Name, " suspect: ", datestr)
-				// checked the correctness of the date. Since we use Elasticsearch to have a fast search,
-				// especially the 'Match' search, the results have to be filtered.
-			} else {
-				fileandfolder := v.Name[len(basedir) + 1:]
-				newpath := filepath.Join(targetdir, fileandfolder)
-				os.MkdirAll(filepath.Dir(newpath), os.ModePerm)
-				err := MoveFile(v.Name, newpath)
-				if err != nil {
-					log.Panic(err)
-				} else {
-					v.Name = newpath
-					err := a.saveSingleSignature(v)
-					if err != nil {
-						MoveFile(newpath, v.Name)
-						return err
-					}
-					log.Println(v.Name, " treated into ", newpath)
-				}
-			}
-		} else {
-			//log.Println(v.Name, " ignored")
+func goodFile(f os.FileInfo, c *Config) bool {
+	return !f.IsDir() && strings.HasSuffix(f.Name(), c.Incoming.Extension)
+}
+
+func incoming(c *Config) error {
+	o := NewOsHandler()
+	files, err := ioutil.ReadDir(c.Incoming.Folder)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range files {
+		if goodFile(f, c) {
+			curFileName := filepath.Join(c.Incoming.Folder, f.Name())
+			fmt.Println(f.Name())
+			newName := f.ModTime().Format(c.Incoming.NameFormat)
+			folder2 := newName[0:10]
+			folder1 := folder2[0:7]
+			newPath := filepath.Join(c.Walker.Folder2, folder1, folder2, newName)
+			moveOrRenameAndMove(o, curFileName, newPath)
 		}
 	}
 	return nil
 }
 
-func MoveFile(sourcePath, destPath string) error {
-	inputFile, err := os.Open(sourcePath)
-	if err != nil {
-		return fmt.Errorf("Couldn't open source file: %s", err)
+
+func moveOrRenameAndMove(o OsInterface, f string, path string) {
+	o.EnsureDirExists(path)
+	count := 0
+	ext := filepath.Ext(path)
+	start := path[0:len(path)-len(ext)]
+	newPath := path
+	for o.ExistsFile(newPath) {
+		count++
+		newPath = start + "_" + fmt.Sprint(count) + ext
 	}
-	outputFile, err := os.Create(destPath)
-	if err != nil {
-		inputFile.Close()
-		return fmt.Errorf("Couldn't open dest file: %s", err)
-	}
-	defer outputFile.Close()
-	_, err = io.Copy(outputFile, inputFile)
-	inputFile.Close()
-	if err != nil {
-		return fmt.Errorf("Writing to output file failed: %s", err)
-	}
-	// The copy was successful, so now delete the original file
-	err = os.Remove(sourcePath)
-	if err != nil {
-		return fmt.Errorf("Failed removing original file: %s", err)
-	}
-	return nil
+	o.MoveFile(f, newPath)
 }
+

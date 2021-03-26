@@ -5,23 +5,23 @@ import (
 	"os/exec"
 )
 
-func dupls(a *EsAdapter, dryRun bool) {
-	dupls := checkDuplicatesBySize(a.signatureDuplicates())
+func dupls(a EsInterface, c *Config, dryRun bool) {
+	dupls := checkDuplicatesBySize(a.SignatureDuplicates())
 	for _, duplArray := range *dupls {
-		if dryRun {
+		if dryRun || c.Duplicates.Action == "show" {
 			fmt.Print("open ")
 			for _, v := range duplArray {
 				fmt.Print(" ", v.Name)
 			}
 			fmt.Println()
-		} else {
+		} else if c.Duplicates.Action == "delete" {
 			for _, v := range duplArray[1:] {
 				cmd := exec.Command("rm", v.Name)
 				err := cmd.Run()
 				if err != nil {
 					panic(err)
 				}
-				err = a.deleteById(v.getIdOrUUID(),v.Name)
+				err = a.DeleteById(v.getIdOrUUID(),v.Name)
 				if err != nil {
 					panic(err)
 				}
